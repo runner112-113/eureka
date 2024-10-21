@@ -47,6 +47,9 @@ import com.netflix.discovery.shared.transport.EurekaTransportConfig;
  * <p>
  * Note that all configurations are not effective at runtime unless and
  * otherwise specified.
+ *
+ *
+ * 客户端配置
  * </p>
  *
  * @author Karthik Ranganathan

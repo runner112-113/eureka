@@ -12,6 +12,11 @@ import com.netflix.discovery.shared.Applications;
  */
 public interface EurekaHttpClient {
 
+    /**
+     * Register new application instance
+     * POST /eureka/v2/apps/appID
+     * Input: JSON/XML payload HTTP Code: 204 on success
+     */
     EurekaHttpResponse<Void> register(InstanceInfo info);
 
     EurekaHttpResponse<Void> cancel(String appName, String id);
