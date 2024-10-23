@@ -60,6 +60,7 @@ public class Lease<T> {
      * {@link #DEFAULT_DURATION_IN_SECS}.
      */
     public void renew() {
+        // 更新最后更新时间，在当前时间的基础上加了一个周期间隔时间，默认90秒
         lastUpdateTimestamp = System.currentTimeMillis() + duration;
 
     }
@@ -108,6 +109,8 @@ public class Lease<T> {
      * @param additionalLeaseMs any additional lease time to add to the lease evaluation in ms.
      */
     public boolean isExpired(long additionalLeaseMs) {
+        // 已经设置过剔除时间，或者 当前时间 > （实例最后更新时间 + 续约周期(90秒) + 补偿时间）
+        // lastUpdateTimestamp中也加过了duration，也就是180s
         return (evictionTimestamp > 0 || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs));
     }
 

@@ -66,9 +66,11 @@ public class Application {
 
     private String name;
 
+    // 是否变更
     @XStreamOmitField
     private volatile boolean isDirty = false;
 
+    // 实例信息
     @XStreamImplicit
     private final Set<InstanceInfo> instances;
 

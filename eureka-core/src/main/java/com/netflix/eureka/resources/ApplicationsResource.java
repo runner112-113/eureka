@@ -89,12 +89,14 @@ public class ApplicationsResource {
      *            application.
      * @return information about a particular application.
      */
+    // 符合规则 /apps/{appName}
     @Path("{appId}")
     public ApplicationResource getApplicationResource(
             @PathParam("version") String version,
             @PathParam("appId") String appId) {
         CurrentRequestVersion.set(Version.toEnum(version));
         try {
+            // 真正的入口
             return new ApplicationResource(appId, serverConfig, registry);
         } finally {
             CurrentRequestVersion.remove();
@@ -116,6 +118,7 @@ public class ApplicationsResource {
      * @return a response containing information about all {@link com.netflix.discovery.shared.Applications}
      *         from the {@link AbstractInstanceRegistry}.
      */
+    // 全量抓取注册表的接口
     @GET
     public Response getContainers(@PathParam("version") String version,
                                   @HeaderParam(HEADER_ACCEPT) String acceptHeader,
@@ -141,6 +144,7 @@ public class ApplicationsResource {
             return Response.status(Status.FORBIDDEN).build();
         }
         CurrentRequestVersion.set(Version.toEnum(version));
+        // json类型
         KeyType keyType = Key.KeyType.JSON;
         String returnMediaType = MediaType.APPLICATION_JSON;
         if (acceptHeader == null || !acceptHeader.contains(HEADER_JSON_VALUE)) {
@@ -148,6 +152,7 @@ public class ApplicationsResource {
             returnMediaType = MediaType.APPLICATION_XML;
         }
 
+        // 全量注册表的缓存key
         Key cacheKey = new Key(Key.EntityType.Application,
                 ResponseCacheImpl.ALL_APPS,
                 keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions
@@ -155,11 +160,13 @@ public class ApplicationsResource {
 
         Response response;
         if (acceptEncoding != null && acceptEncoding.contains(HEADER_GZIP_VALUE)) {
+            // 压缩返回
             response = Response.ok(responseCache.getGZIP(cacheKey))
                     .header(HEADER_CONTENT_ENCODING, HEADER_GZIP_VALUE)
                     .header(HEADER_CONTENT_TYPE, returnMediaType)
                     .build();
         } else {
+            // 根据缓存 key 从 responseCache 获取全量注册表
             response = Response.ok(responseCache.get(cacheKey))
                     .build();
         }
@@ -196,6 +203,7 @@ public class ApplicationsResource {
      * @return response containing the delta information of the
      *         {@link AbstractInstanceRegistry}.
      */
+    // 增量抓取
     @Path("delta")
     @GET
     public Response getContainerDifferential(
@@ -230,6 +238,7 @@ public class ApplicationsResource {
             returnMediaType = MediaType.APPLICATION_XML;
         }
 
+        // 增量抓取时 ALL_APPS_DELTA
         Key cacheKey = new Key(Key.EntityType.Application,
                 ResponseCacheImpl.ALL_APPS_DELTA,
                 keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions

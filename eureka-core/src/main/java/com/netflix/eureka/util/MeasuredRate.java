@@ -29,6 +29,7 @@ import org.slf4j.LoggerFactory;
  */
 public class MeasuredRate {
     private static final Logger logger = LoggerFactory.getLogger(MeasuredRate.class);
+    // 利用了两个桶来计数，一个是上一分钟，一个是当前这一分钟
     private final AtomicLong lastBucket = new AtomicLong(0);
     private final AtomicLong currentBucket = new AtomicLong(0);
 
@@ -41,7 +42,9 @@ public class MeasuredRate {
      * @param sampleInterval in milliseconds
      */
     public MeasuredRate(long sampleInterval) {
+        // 间隔时间
         this.sampleInterval = sampleInterval;
+        // 定时器
         this.timer = new Timer("Eureka-MeasureRateTimer", true);
         this.isActive = false;
     }
@@ -54,6 +57,7 @@ public class MeasuredRate {
                 public void run() {
                     try {
                         // Zero out the current bucket.
+                        // 每分钟执行一次，将当前这一分钟的次数设置到上一分钟的桶里
                         lastBucket.set(currentBucket.getAndSet(0));
                     } catch (Throwable e) {
                         logger.error("Cannot reset the Measured Rate", e);
@@ -76,6 +80,7 @@ public class MeasuredRate {
      * Returns the count in the last sample interval.
      */
     public long getCount() {
+        // 获取计数时是获取的上一分钟这个桶的计数
         return lastBucket.get();
     }
 
@@ -83,6 +88,7 @@ public class MeasuredRate {
      * Increments the count in the current sample interval.
      */
     public void increment() {
+        // 增加计数的时候是增加的当前这个桶的计数
         currentBucket.incrementAndGet();
     }
 }

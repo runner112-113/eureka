@@ -56,6 +56,7 @@ class InstanceInfoReplicator implements Runnable {
         this.replicationIntervalSeconds = replicationIntervalSeconds;
         this.burstSize = burstSize;
 
+        // 允许每分钟更新的频率 60 * 2 / 30 = 4
         this.allowedRatePerMinute = 60 * this.burstSize / this.replicationIntervalSeconds;
         logger.info("InstanceInfoReplicator onDemand update allowed rate per min is {}", allowedRatePerMinute);
     }
@@ -64,6 +65,7 @@ class InstanceInfoReplicator implements Runnable {
         if (started.compareAndSet(false, true)) {
             instanceInfo.setIsDirty();  // for initial register
             Future next = scheduler.schedule(this, initialDelayMs, TimeUnit.SECONDS);
+            // Future放入本地变量
             scheduledPeriodicRef.set(next);
         }
     }
@@ -112,12 +114,19 @@ class InstanceInfoReplicator implements Runnable {
         }
     }
 
+    /**
+     * 1.首先会更新实例的信息，如果有变更就会设置 dirty=true
+     * 2.如果是 dirty 的，就会调用 DiscoveryClient 的 register 方法注册实例
+     * 3.实例注册后，就把 dirty 设置为 false
+     * 4.最后在 finally 中继续下一次的调度，默认是每隔30秒调度一次，注意他这里是把调度结果 Future 放到本地变量中
+     */
     public void run() {
         try {
             discoveryClient.refreshInstanceInfo();
 
             Long dirtyTimestamp = instanceInfo.isDirtyWithTime();
             if (dirtyTimestamp != null) {
+                // 注册
                 discoveryClient.register();
                 instanceInfo.unsetIsDirty(dirtyTimestamp);
             }

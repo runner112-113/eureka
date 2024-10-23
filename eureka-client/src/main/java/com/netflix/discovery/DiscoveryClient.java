@@ -1028,6 +1028,8 @@ public class DiscoveryClient implements EurekaClient {
                 // 增量获取注册表
                 getAndUpdateDelta(applications);
             }
+
+            // 设置reconcilehashcode
             applications.setAppsHashCode(applications.getReconcileHashCode());
             logTotalInstances();
         } catch (Throwable e) {
@@ -1041,6 +1043,7 @@ public class DiscoveryClient implements EurekaClient {
         }
 
         // Notify about cache refresh before updating the instance remote status
+        // 发送事件 CacheRefreshedEvent
         onCacheRefreshed();
 
         // Update remote status based on refreshed data held in the cache
@@ -1145,11 +1148,13 @@ public class DiscoveryClient implements EurekaClient {
         long currentUpdateGeneration = fetchRegistryGeneration.get();
 
         Applications delta = null;
+        // 调用远程接口增量抓取：GET apps/delta
         EurekaHttpResponse<Applications> httpResponse = eurekaTransport.queryClient.getDelta(remoteRegionsRef.get());
         if (httpResponse.getStatusCode() == Status.OK.getStatusCode()) {
             delta = httpResponse.getEntity();
         }
 
+        // 如果增量抓取的数据为空，就会进行一次全量抓取
         if (delta == null) {
             logger.warn("The server does not allow the delta revision to be applied because it is not safe. "
                     + "Hence got the full registry.");
@@ -1157,9 +1162,12 @@ public class DiscoveryClient implements EurekaClient {
         } else if (fetchRegistryGeneration.compareAndSet(currentUpdateGeneration, currentUpdateGeneration + 1)) {
             logger.debug("Got delta update with apps hashcode {}", delta.getAppsHashCode());
             String reconcileHashCode = "";
+            // 加锁更新本地注册表
             if (fetchRegistryUpdateLock.tryLock()) {
                 try {
+                    // 抓取到增量的注册表后，跟本地的注册表合并
                     updateDelta(delta);
+                    // 注册表合并完成后，根据本地 applications 计算一个 hash 值
                     reconcileHashCode = getReconcileHashCode(applications);
                 } finally {
                     fetchRegistryUpdateLock.unlock();
@@ -1168,6 +1176,8 @@ public class DiscoveryClient implements EurekaClient {
                 logger.warn("Cannot acquire update lock, aborting getAndUpdateDelta");
             }
             // There is a diff in number of instances for some reason
+            // delta 中会返回 server 端注册表的 hash 值，如果和本地计算出来的 hash 值不一样，
+            // 说明本地注册表跟 server 端注册表不一样，就会从 server 全量拉取注册表更新到本地缓存
             if (!reconcileHashCode.equals(delta.getAppsHashCode()) || clientConfig.shouldLogDeltaDiff()) {
                 reconcileAndLogDifference(delta, reconcileHashCode);  // this makes a remoteCall
             }
@@ -1249,7 +1259,9 @@ public class DiscoveryClient implements EurekaClient {
      */
     private void updateDelta(Applications delta) {
         int deltaCount = 0;
+        // 变量增量注册的服务
         for (Application app : delta.getRegisteredApplications()) {
+            // 遍历实例
             for (InstanceInfo instance : app.getInstances()) {
                 Applications applications = getApplications();
                 String instanceRegion = instanceRegionChecker.getInstanceRegion(instance);
@@ -1263,6 +1275,7 @@ public class DiscoveryClient implements EurekaClient {
                 }
 
                 ++deltaCount;
+                // ADDED 新增的实例：服务注册
                 if (ActionType.ADDED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
                     if (existingApp == null) {
@@ -1270,6 +1283,7 @@ public class DiscoveryClient implements EurekaClient {
                     }
                     logger.debug("Added instance {} to the existing apps in region {}", instance.getId(), instanceRegion);
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
+                // MODIFIED 变更的实例：续约，信息变更
                 } else if (ActionType.MODIFIED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
                     if (existingApp == null) {
@@ -1279,6 +1293,7 @@ public class DiscoveryClient implements EurekaClient {
 
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
 
+                // DELETED 移除实例：实例下线、故障
                 } else if (ActionType.DELETED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
                     if (existingApp != null) {
@@ -1314,6 +1329,7 @@ public class DiscoveryClient implements EurekaClient {
             // registry cache refresh timer
             // 默认30s刷新一次本地缓存
             int registryFetchIntervalSeconds = clientConfig.getRegistryFetchIntervalSeconds();
+            // 心跳调度器的延迟时间扩大倍数，默认10
             int expBackOffBound = clientConfig.getCacheRefreshExecutorExponentialBackOffBound();
             cacheRefreshTask = new TimedSupervisorTask(
                     "cacheRefresh",
@@ -1350,12 +1366,14 @@ public class DiscoveryClient implements EurekaClient {
                     renewalIntervalInSecs, TimeUnit.SECONDS);
 
             // InstanceInfo replicator
+            // 实例信息复制器，用于定时更新自己状态，并向注册中心注册
             instanceInfoReplicator = new InstanceInfoReplicator(
                     this,
                     instanceInfo,
                     clientConfig.getInstanceInfoReplicationIntervalSeconds(),
                     2); // burstSize
 
+            // 实例状态变更的监听器
             statusChangeListener = new ApplicationInfoManager.StatusChangeListener() {
                 @Override
                 public String getId() {
@@ -1369,10 +1387,12 @@ public class DiscoveryClient implements EurekaClient {
                 }
             };
 
+            // 向 ApplicationInfoManager 注册状态变更监听器
             if (clientConfig.shouldOnDemandUpdateStatusChange()) {
                 applicationInfoManager.registerStatusChangeListener(statusChangeListener);
             }
 
+            // 启动实例信息复制器，默认延迟时间40秒
             instanceInfoReplicator.start(clientConfig.getInitialInstanceInfoReplicationIntervalSeconds());
         } else {
             logger.info("Not registering with Eureka server per configuration");
@@ -1447,11 +1467,14 @@ public class DiscoveryClient implements EurekaClient {
      * isDirty flag on the instanceInfo is set to true
      */
     void refreshInstanceInfo() {
+        // 如果有必要，就更新数据中心的信息
         applicationInfoManager.refreshDataCenterInfoIfRequired();
+        // 如果有必要，就更新续约信息，比如动态更新了配置文件，这时就更新续约信息 LeaseInfo，并将实例设置为 dirty
         applicationInfoManager.refreshLeaseInfoIfRequired();
 
         InstanceStatus status;
         try {
+            // 用健康检查器检查实例的状态
             status = getHealthCheckHandler().getStatus(instanceInfo.getStatus());
         } catch (Exception e) {
             logger.warn("Exception from healthcheckHandler.getStatus, setting status to DOWN", e);
@@ -1459,6 +1482,7 @@ public class DiscoveryClient implements EurekaClient {
         }
 
         if (null != status) {
+            // 设置实例状态，实例状态变了会触发状态变更的监听器
             applicationInfoManager.setInstanceStatus(status);
         }
     }
@@ -1489,6 +1513,7 @@ public class DiscoveryClient implements EurekaClient {
     public HealthCheckHandler getHealthCheckHandler() {
         HealthCheckHandler healthCheckHandler = this.healthCheckHandlerRef.get();
         if (healthCheckHandler == null) {
+            // 可以自定义 HealthCheckHandler 实现健康检查
             if (null != healthCheckHandlerProvider) {
                 healthCheckHandler = healthCheckHandlerProvider.get();
             } else if (null != healthCheckCallbackProvider) {
@@ -1496,6 +1521,7 @@ public class DiscoveryClient implements EurekaClient {
             }
 
             if (null == healthCheckHandler) {
+                // 默认使用桥接类
                 healthCheckHandler = new HealthCheckCallbackToHandlerBridge(null);
             }
             this.healthCheckHandlerRef.compareAndSet(null, healthCheckHandler);

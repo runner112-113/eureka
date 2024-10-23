@@ -77,7 +77,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private static final Logger logger = LoggerFactory.getLogger(AbstractInstanceRegistry.class);
 
     private static final String[] EMPTY_STR_ARRAY = new String[0];
-    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
+    private final ConcurrentHashMap<String/*服务名称*/, Map<String/*实例ID*/, Lease<InstanceInfo>>/*实例集合*/> registry
             = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
     protected final ConcurrentMap<String, InstanceStatus> overriddenInstanceStatusMap = CacheBuilder
@@ -95,6 +95,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private final Lock write = readWriteLock.writeLock();
     protected final Object lock = new Object();
 
+    // 一个定时调度任务，定时剔除最近改变队列中过期的实例
     private Timer deltaRetentionTimer = new Timer("Eureka-DeltaRetentionTimer", true);
     private Timer evictionTimer = new Timer("Eureka-EvictionTimer", true);
     private final MeasuredRate renewsLastMin;
@@ -122,8 +123,11 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
 
+        // 一个定时调度任务，定时剔除最近改变队列中过期的实例
         this.deltaRetentionTimer.schedule(getDeltaRetentionTask(),
+                // 调度任务延迟 30 秒开始执行
                 serverConfig.getDeltaRetentionTimerIntervalInMs(),
+                // 默认每隔 30 秒执行一次
                 serverConfig.getDeltaRetentionTimerIntervalInMs());
     }
 
@@ -222,7 +226,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 synchronized (lock) {
                     if (this.expectedNumberOfClientsSendingRenews > 0) {
                         // Since the client wants to register it, increase the number of clients sending renews
+                        // 期望续约的客户端数量 +1
                         this.expectedNumberOfClientsSendingRenews = this.expectedNumberOfClientsSendingRenews + 1;
+                        // 每分钟续约次数的阈值，如果低于这个值，说明有很多客户端没有发送心跳，这时eureka就认为可能网络出问题了，就会有另一些机制，这个后面再说
                         updateRenewsPerMinThreshold();
                     }
                 }
@@ -233,6 +239,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 lease.setServiceUpTimestamp(existingLease.getServiceUpTimestamp());
             }
             gMap.put(registrant.getId(), lease);
+            // 根据当前时间戳、服务名称、实例ID封装一个 Pair，然后放入到最近注册的队列中 recentRegisteredQueue
             recentRegisteredQueue.add(new Pair<Long, String>(
                     System.currentTimeMillis(),
                     registrant.getAppName() + "(" + registrant.getId() + ")"));
@@ -262,6 +269,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             registrant.setActionType(ActionType.ADDED);
             recentlyChangedQueue.add(new RecentlyChangedItem(lease));
             registrant.setLastUpdatedTimestamp();
+            // 将读写缓存 readWriteCacheMap 中与这个实例相关的缓存失效掉
+            // 那这里就要注意了，如果服务注册、下线、故障之类的，这里只是失效了读写缓存，然后可能要间隔30秒才能同步到只读缓存 readOnlyCacheMap，那么其它客户端可能要隔30秒后才能感知到。
             invalidateCache(registrant.getAppName(), registrant.getVIPAddress(), registrant.getSecureVipAddress());
             logger.info("Registered instance {}/{} with status {} (replication={})",
                     registrant.getAppName(), registrant.getId(), registrant.getStatus(), isReplication);
@@ -298,11 +307,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         read.lock();
         try {
             CANCEL.increment(isReplication);
+            // 根据服务名称取出服务租约信息
             Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
             Lease<InstanceInfo> leaseToCancel = null;
             if (gMap != null) {
+                // 根据实例ID移除实例租约信息
                 leaseToCancel = gMap.remove(id);
             }
+            // 将移除的实例ID加入到最近下线的队列中
             recentCanceledQueue.add(new Pair<Long, String>(System.currentTimeMillis(), appName + "(" + id + ")"));
             InstanceStatus instanceStatus = overriddenInstanceStatusMap.remove(id);
             if (instanceStatus != null) {
@@ -313,17 +325,21 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 logger.warn("DS: Registry: cancel failed because Lease is not registered for: {}/{}", appName, id);
                 return false;
             } else {
+                // 下线实例，设置了实例的下线时间 evictionTimestamp 为当前时间戳
                 leaseToCancel.cancel();
                 InstanceInfo instanceInfo = leaseToCancel.getHolder();
                 String vip = null;
                 String svip = null;
                 if (instanceInfo != null) {
+                    // 设置实例 ActionType 为 DELETED
                     instanceInfo.setActionType(ActionType.DELETED);
+                    // 加入最近变更队列中
                     recentlyChangedQueue.add(new RecentlyChangedItem(leaseToCancel));
                     instanceInfo.setLastUpdatedTimestamp();
                     vip = instanceInfo.getVIPAddress();
                     svip = instanceInfo.getSecureVipAddress();
                 }
+                // 失效缓存
                 invalidateCache(appName, vip, svip);
                 logger.info("Cancelled instance {}/{} (replication={})", appName, id, isReplication);
             }
@@ -332,9 +348,11 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         }
 
         synchronized (lock) {
+            // 期望续约的客户端数量 - 1
             if (this.expectedNumberOfClientsSendingRenews > 0) {
                 // Since the client wants to cancel it, reduce the number of clients to send renews.
                 this.expectedNumberOfClientsSendingRenews = this.expectedNumberOfClientsSendingRenews - 1;
+                // 更新每分钟续约次数的阈值
                 updateRenewsPerMinThreshold();
             }
         }
@@ -350,9 +368,11 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      */
     public boolean renew(String appName, String id, boolean isReplication) {
         RENEW.increment(isReplication);
+        // 根据服务名从注册表取出租约信息
         Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
         Lease<InstanceInfo> leaseToRenew = null;
         if (gMap != null) {
+            // 根据实例ID取出实例租约信息
             leaseToRenew = gMap.get(id);
         }
         if (leaseToRenew == null) {
@@ -381,7 +401,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
                 }
             }
+            // 最近一分钟续约计数器+1
             renewsLastMin.increment();
+            // 续约
             leaseToRenew.renew();
             return true;
         }
@@ -586,6 +608,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     public void evict(long additionalLeaseMs) {
         logger.debug("Running the evict task");
 
+        // 首先判断是否启用了租约过期的机制(自我保护)
+        // 首先，如果没有启用自我保护机制，就返回 true，那就可以摘除实例
+        // 如果启用了自我保护机制（默认启用），就判断每分钟续约阈值 > 0 且 最近一分钟续约次数 > 每分钟续约阈值 就是启用了租约过期
         if (!isLeaseExpirationEnabled()) {
             logger.debug("DS: lease expiration is currently disabled.");
             return;
@@ -600,7 +625,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             if (leaseMap != null) {
                 for (Entry<String, Lease<InstanceInfo>> leaseEntry : leaseMap.entrySet()) {
                     Lease<InstanceInfo> lease = leaseEntry.getValue();
+                    // 判断实例租约是否过期
                     if (lease.isExpired(additionalLeaseMs) && lease.getHolder() != null) {
+                        // 加入到过期的集合列表中
                         expiredLeases.add(lease);
                     }
                 }
@@ -609,10 +636,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         // To compensate for GC pauses or drifting local time, we need to use current registry size as a base for
         // triggering self-preservation. Without that we would wipe out full registry.
+        // 先获取注册表已注册的实例数量
         int registrySize = (int) getLocalRegistrySize();
+        // 注册表数量保留的阈值：已注册的实例数 * 续约百分比阈值（默认0.85）
         int registrySizeThreshold = (int) (registrySize * serverConfig.getRenewalPercentThreshold());
+        // 剔除的数量限制，也就是说一次最多只能剔除 15% 的实例
         int evictionLimit = registrySize - registrySizeThreshold;
 
+        // 得到最小的剔除数量
         int toEvict = Math.min(expiredLeases.size(), evictionLimit);
         if (toEvict > 0) {
             logger.info("Evicting {} items (expired={}, evictionLimit={})", toEvict, expiredLeases.size(), evictionLimit);
@@ -620,14 +651,17 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             Random random = new Random(System.currentTimeMillis());
             for (int i = 0; i < toEvict; i++) {
                 // Pick a random item (Knuth shuffle algorithm)
+                // 根据要剔除的数量从 expiredLeases 中随机剔除 toEvict 个过期实例
                 int next = i + random.nextInt(expiredLeases.size() - i);
                 Collections.swap(expiredLeases, i, next);
                 Lease<InstanceInfo> lease = expiredLeases.get(i);
 
                 String appName = lease.getHolder().getAppName();
+                // 实例ID
                 String id = lease.getHolder().getId();
                 EXPIRED.increment();
                 logger.warn("DS: Registry: expired lease for {}/{}", appName, id);
+                // 调用下线的方法
                 internalCancel(appName, id, false);
             }
         }
@@ -876,6 +910,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         Map<String, Application> applicationInstancesMap = new HashMap<String, Application>();
         write.lock();
         try {
+            // 最近变更队列 recentlyChangedQueue，这就是增量的注册表
+            // recentlyChangedQueue 只保留了最近3分钟有变化的实例，如实例上线、下线、故障剔除
             Iterator<RecentlyChangedItem> iter = this.recentlyChangedQueue.iterator();
             logger.debug("The number of elements in the delta queue is : {}",
                     this.recentlyChangedQueue.size());
@@ -912,7 +948,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 }
             }
 
+            // 获取所有应用实例
             Applications allApps = getApplications(!disableTransparentFallback);
+            // 根据所有应用实例计算一个 hash 值，并设置到要返回的 apps 中
             apps.setAppsHashCode(allApps.getReconcileHashCode());
             return apps;
         } finally {
@@ -1180,12 +1218,16 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         return list;
     }
 
+    // 缓存失效
     private void invalidateCache(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress) {
         // invalidate cache
         responseCache.invalidate(appName, vipAddress, secureVipAddress);
     }
 
     protected void updateRenewsPerMinThreshold() {
+        // 每分钟续约阈值 = 期望续约的客户端数量 * （60 / 续约间隔时间） * 续约百分比
+        // 例如，一共注册了 10 个实例，那么期望续约的客户端数量为 10，间隔时间默认为 30秒，就是每个客户端应该每30秒发送一次心跳，续约百分比默认为 0.85
+        // 每分钟续约次数阈值 = 10 * (60.0 / 30) * 0.85 = 17，也就是说每分钟至少要接收到 17 此续约请求
         this.numberOfRenewsPerMinThreshold = (int) (this.expectedNumberOfClientsSendingRenews
                 * (60.0 / serverConfig.getExpectedClientRenewalIntervalSeconds())
                 * serverConfig.getRenewalPercentThreshold());
@@ -1210,13 +1252,16 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     }
 
     protected void postInit() {
+        // 启动 统计最近一分钟续约次数的计数器
         renewsLastMin.start();
         if (evictionTaskRef.get() != null) {
             evictionTaskRef.get().cancel();
         }
+        // 定时剔除任务
         evictionTaskRef.set(new EvictionTask());
         evictionTimer.schedule(evictionTaskRef.get(),
                 serverConfig.getEvictionIntervalTimerInMs(),
+                // 每隔60秒执行一次
                 serverConfig.getEvictionIntervalTimerInMs());
     }
 
@@ -1243,6 +1288,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         @Override
         public void run() {
             try {
+                // TODO：important
+                // 获取补偿时间，因为两次 EvictionTask 执行的间隔时间可能超过了设置的60秒，比如 GC 导致的停顿或本地时间漂移导致计时不准确
                 long compensationTimeMs = getCompensationTimeMs();
                 logger.info("Running the evict task with compensationTime {}ms", compensationTimeMs);
                 evict(compensationTimeMs);
@@ -1264,7 +1311,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 return 0l;
             }
 
+            // 两次任务运行的间隔时间
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(currNanos - lastNanos);
+            // 补偿时间 = 任务运行间隔时间 - 剔除任务的间隔时间（默认60秒）
             long compensationTime = elapsedMs - serverConfig.getEvictionIntervalTimerInMs();
             return compensationTime <= 0l ? 0l : compensationTime;
         }
@@ -1342,6 +1391,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
             @Override
             public void run() {
+                // 最近更新时间超过 180 秒就认为数据已经同步到各个客户端了，就从队列中移除
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 while (it.hasNext()) {
                     if (it.next().getLastUpdateTime() <

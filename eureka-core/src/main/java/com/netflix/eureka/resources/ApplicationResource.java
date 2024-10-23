@@ -139,7 +139,14 @@ public class ApplicationResource {
      * @param isReplication
      *            a header parameter containing information whether this is
      *            replicated from other nodes.
+     *
+     *
+     * InstanceInfo：服务实例，主要有两块数据：
+     *      基本信息：主机名、IP地址、端口号、URL地址
+     *      租约信息：保持心跳的间隔时间、最近心跳的时间、服务注册的时间、服务启动的时间
+     * isReplication：这个参数是从请求头中取的，表示是否是在同步 server 节点的实例。在集群模式下，因为客户端实例注册到注册中心后，会同步到其它 server节点，所以如果是eureka-server之间同步信息，这个参数就为 true，避免循环同步
      */
+
     @POST
     @Consumes({"application/json", "application/xml"})
     public Response addInstance(InstanceInfo info,
