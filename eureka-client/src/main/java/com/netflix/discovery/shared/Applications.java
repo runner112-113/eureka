@@ -84,7 +84,7 @@ public class Applications {
     private Long versionDelta;
     @XStreamImplicit
     private final AbstractQueue<Application> applications;
-    private final Map<String, Application> appNameApplicationMap;
+    private final Map<String/*应用名称*/, Application/*应用信息，包含多实例信息*/> appNameApplicationMap;
     private final Map<String, VipIndexSupport> virtualHostNameAppMap;
     private final Map<String, VipIndexSupport> secureVirtualHostNameAppMap;
 

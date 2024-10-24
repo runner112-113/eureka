@@ -113,7 +113,7 @@ import com.netflix.servo.monitor.Stopwatch;
  *
  */
 @Singleton
-public class DiscoveryClient implements EurekaClient {
+public class  DiscoveryClient implements EurekaClient {
     private static final Logger logger = LoggerFactory.getLogger(DiscoveryClient.class);
 
     // Constants
